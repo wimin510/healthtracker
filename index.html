@@ -25,6 +25,7 @@
             doc, 
             setDoc, 
             getDoc, 
+            deleteDoc,
             collection, 
             addDoc, 
             query, 
@@ -51,6 +52,7 @@
         // State
         let currentUser = null;
         let fastingTimer = null;
+        let fastingStartTime = null; // 儲存開始時間物件
         let chart = null;
         let authUnsubscribe = null;
         let weightUnsubscribe = null;
@@ -69,11 +71,16 @@
                     mainApp.classList.remove('hidden');
                     document.getElementById('user-email-display').innerText = user.email || '匿名使用者';
                     loadUserData();
+                    loadFastingState(); // 新增：登入時載入斷食狀態
                     setupRealtimeListeners();
                 } else {
                     currentUser = null;
                     authOverlay.classList.remove('hidden');
                     mainApp.classList.add('hidden');
+                    // 清除計時器狀態
+                    if (fastingTimer) clearInterval(fastingTimer);
+                    fastingTimer = null;
+                    fastingStartTime = null;
                     cleanupListeners();
                 }
             });
@@ -242,39 +249,113 @@
             } catch (err) { console.error("Load user data error:", err); }
         }
 
-        // --- Fasting Timer Logic ---
-        let fastingStartTime = null;
-        window.toggleFasting = () => {
+        // --- Fasting Timer Logic (Enhanced for Persistence) ---
+        
+        // 1. 載入斷食狀態
+        async function loadFastingState() {
+            if (!currentUser) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'fasting', 'current_state');
+                const snap = await getDoc(docRef);
+                
+                if (snap.exists() && snap.data().startTime) {
+                    fastingStartTime = new Date(snap.data().startTime);
+                    
+                    // 更新 UI 為「正在斷食」
+                    const btn = document.getElementById('fasting-btn');
+                    btn.innerText = "結束斷食";
+                    btn.classList.replace('bg-white', 'bg-red-500');
+                    btn.classList.replace('text-blue-600', 'text-white');
+                    
+                    // 立即開始計時
+                    startTimer();
+                } else {
+                    // 確保 UI 重置
+                    resetTimerUI();
+                }
+            } catch (error) {
+                console.error("Failed to load fasting state:", error);
+            }
+        }
+
+        // 2. 切換斷食開關
+        window.toggleFasting = async () => {
+            if (!currentUser) {
+                showToast("請先登入");
+                return;
+            }
+
             const btn = document.getElementById('fasting-btn');
+            const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'fasting', 'current_state');
+
             if (!fastingTimer) {
-                fastingStartTime = new Date();
-                btn.innerText = "結束斷食";
-                btn.classList.replace('bg-white', 'bg-red-500');
-                btn.classList.replace('text-blue-600', 'text-white');
-                startTimer();
+                // 開始斷食
+                const now = new Date();
+                fastingStartTime = now;
+                
+                // 存入 Firebase
+                try {
+                    await setDoc(docRef, { startTime: now.toISOString() });
+                    
+                    btn.innerText = "結束斷食";
+                    btn.classList.replace('bg-white', 'bg-red-500');
+                    btn.classList.replace('text-blue-600', 'text-white');
+                    startTimer();
+                } catch (error) {
+                    console.error("Error saving fasting state:", error);
+                    showToast("開始失敗，請檢查網路");
+                }
             } else {
-                clearInterval(fastingTimer);
-                fastingTimer = null;
-                btn.innerText = "開始斷食 (168)";
-                btn.classList.replace('bg-red-500', 'bg-white');
-                btn.classList.replace('text-white', 'text-blue-600');
-                document.getElementById('timer-display').innerText = "00:00:00";
-                document.getElementById('fasting-progress').style.width = '0%';
+                // 結束斷食
+                try {
+                    await deleteDoc(docRef); // 從資料庫移除
+                    resetTimerUI();
+                } catch (error) {
+                    console.error("Error clearing fasting state:", error);
+                    showToast("停止失敗，請檢查網路");
+                }
             }
         };
 
         function startTimer() {
+            if (fastingTimer) clearInterval(fastingTimer); // 防止重複啟動
+            
+            // 立即執行一次更新，避免等待 1 秒
+            updateTimerDisplay();
+
             fastingTimer = setInterval(() => {
-                const now = new Date();
-                const diff = Math.floor((now - fastingStartTime) / 1000);
-                const h = String(Math.floor(diff / 3600)).padStart(2, '0');
-                const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
-                const s = String(diff % 60).padStart(2, '0');
-                document.getElementById('timer-display').innerText = `${h}:${m}:${s}`;
-                
-                const progress = Math.min((diff / (16 * 3600)) * 100, 100);
-                document.getElementById('fasting-progress').style.width = `${progress}%`;
+                updateTimerDisplay();
             }, 1000);
+        }
+
+        function updateTimerDisplay() {
+            if (!fastingStartTime) return;
+            const now = new Date();
+            const diff = Math.floor((now - fastingStartTime) / 1000);
+            
+            // 防止時間負數
+            if (diff < 0) return;
+
+            const h = String(Math.floor(diff / 3600)).padStart(2, '0');
+            const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+            const s = String(diff % 60).padStart(2, '0');
+            document.getElementById('timer-display').innerText = `${h}:${m}:${s}`;
+            
+            const progress = Math.min((diff / (16 * 3600)) * 100, 100);
+            document.getElementById('fasting-progress').style.width = `${progress}%`;
+        }
+
+        function resetTimerUI() {
+            const btn = document.getElementById('fasting-btn');
+            if (fastingTimer) clearInterval(fastingTimer);
+            fastingTimer = null;
+            fastingStartTime = null;
+            
+            btn.innerText = "開始斷食 (168)";
+            btn.classList.replace('bg-red-500', 'bg-white');
+            btn.classList.replace('text-white', 'text-blue-600');
+            document.getElementById('timer-display').innerText = "00:00:00";
+            document.getElementById('fasting-progress').style.width = '0%';
         }
 
         // --- Weight Chart Logic ---
